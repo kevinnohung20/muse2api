@@ -39,4 +39,4 @@ VOLUME ["/app/data"]
 
 EXPOSE 3000
 
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "18610"]
+CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000"]
