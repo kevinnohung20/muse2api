@@ -3,8 +3,8 @@
   "updated_at": "2026-10-11",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "支持多账号真并行并发执行（基于 Chromium 独立 BrowserContext 隐身容器隔离，多账号间 Cookie / Session 零污染互不干扰）",
-    "引入智能账号池调度器与并发锁（支持通过 MUSE2API_CONCURRENCY 配置并发槽位上限，同账号互斥防踩踏，多账号自动并行调度）",
-    "合并社区 PR #18：精确区分视频与封面静帧匹配逻辑，彻底杜绝视频误返回静止图片问题"
+    "Support true multi-account parallel concurrent execution (isolated via independent Chromium BrowserContext incognito containers, zero Cookie/Session contamination between accounts)",
+    "Intelligent account pool scheduler and concurrency lock (supports configurable slot limit via MUSE2API_CONCURRENCY, per-account mutex to prevent collisions, automatic multi-account parallel dispatch)",
+    "Merged community PR #18: Accurately distinguish video vs cover static frame matching logic, completely eliminating the issue of returning static images instead of videos"
   ]
 }
