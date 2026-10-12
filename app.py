@@ -430,9 +430,8 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     """OpenAI Chat Completions request model."""
 
-    """
     model: str = "muse-spark"
-    messages: list[ChatMessage] = []
+    messages: list[ChatMessage] = Field(default_factory=list)
     stream: bool = False
     temperature: float | None = None
     max_tokens: int | None = None
@@ -496,7 +495,7 @@ def build_image_prompt(r: ImageRequest) -> str:
         parts.append(f"Size/Ratio: {r.size}")
 
     if has_ref:
-    parts.append("[Clean Image Requirement]: Completely remove all watermarks, text, signatures, and logos (clean image without watermarks)")
+        parts.append("[Clean Image Requirement]: Completely remove all watermarks, text, signatures, and logos (clean image without watermarks)")
 
     if r.extra:
         parts.append(r.extra)
@@ -517,7 +516,7 @@ def _content_text(content) -> str:
                 if t in (None, "text", "input_text", "output_text"):
                     parts.append(str(item.get("text") or ""))
                 elif t == "image_url":
-                parts.append("[Image]")
+                    parts.append("[Image]")
             elif isinstance(item, str):
                 parts.append(item)
         return "\n".join(p for p in parts if p)
@@ -527,7 +526,6 @@ def _content_text(content) -> str:
 def build_chat_prompt(messages: list[ChatMessage]) -> str:
     """Assemble messages into a prompt for muse.ai."""
 
-    """
     system, turns = [], []
     for m in messages:
         role = (m.role or "").strip().lower()
@@ -771,8 +769,6 @@ def parse_batch(text: str) -> list[tuple[str, dict]]:
 def _sync_cookies(acc_id: str) -> dict:
     """Read renewed cookies back from browser and update account pool."""
 
-
-    """
     try:
         live = engine.read_cookies()
         if not live:
@@ -1202,7 +1198,6 @@ def _want_usage(stream_options) -> bool:
 
 def _pace_text(text: str, chunk_size: int = 2, delay: float = 0.012):
     """Smoothly slice text into streaming typewriter tokens."""
-    """
     if not text:
         return
     if len(text) <= 3 or delay <= 0:
@@ -1226,8 +1221,6 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
     """OpenAI-compatible chat completions endpoint."""
 
 
-
-    """
     prompt = build_chat_prompt(req.messages) or (req.prompt or "").strip()
     if not prompt:
         raise HTTPException(400, "messages cannot be empty")
@@ -1251,7 +1244,7 @@ async def chat_completions(req: ChatRequest, _=Depends(auth)):
     expires = acc.get("cookies_exp")
 
     def tool_call_deltas(calls: list[dict]) -> list[list[dict]]:
-    """Send tool_calls chunks in OpenAI standard format."""
+        """Send tool_calls chunks in OpenAI standard format."""
         head = [{"index": i, "id": c["id"], "type": "function",
                  "function": {"name": c["function"]["name"], "arguments": ""}}
                 for i, c in enumerate(calls)]
@@ -1371,7 +1364,7 @@ def _responses_messages(req: ResponsesRequest) -> list[ChatMessage]:
             if not isinstance(item, dict):
                 continue
             itype = item.get("type")
-        if item.get("role"):                      # message format
+            if item.get("role"):                  # message format
                 msgs.append(ChatMessage(role=item["role"],
                                         content=item.get("content")))
             elif itype == "input_text":
@@ -1578,7 +1571,7 @@ async def test_account(aid: str, _=Depends(auth)):
                 engine.refresh(acc["cookies"], acc.get("cookies_exp"))
                 synced = _sync_cookies(aid)
                 quota = None
-        try:  # Refresh quota if available
+                try:  # Refresh quota if available
                     quota = engine.quota(acc["cookies"],
                                          acc.get("cookies_exp"))
                     quota["checked_at"] = int(time.time())
@@ -1747,7 +1740,6 @@ def cookie_helper(download: int = 0):
 def extension_zip():
     """Package browser extension into zip for 1-click import."""
 
-    """
     src = os.path.join(BASE_DIR, "extension")
     if not os.path.isdir(src):
         raise HTTPException(404, "Extension directory missing")
