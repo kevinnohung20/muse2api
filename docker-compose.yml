@@ -7,7 +7,7 @@ services:
     container_name: muse2api
     restart: always
     ports:
-      - "18610:18610"
+      - "18610:3000"
     environment:
       # 管理与 API 鉴权 Key（从 .env 或宿主环境读取，留空则自动生成）
       - MUSE2API_KEY=${MUSE2API_KEY:-}
