@@ -209,7 +209,8 @@
       <span class="pill" id="pAcc"><span class="led"></span>Tài khoản <b>—</b></span>
       <span class="pill" id="pBr"><span class="led"></span>Trình duyệt <b>—</b></span>
       <span class="live" id="live"><span class="led"></span>Tự động làm mới</span>
-      <span class="keybox" id="keyBox">
+      <button class="ghost mini" onclick="logout()">Đăng xuất</button>
+      <span class="keybox" id="keyBox" style="display:none">
         <span class="lbl" id="keyLbl">API Key</span>
         <input id="key" type="password" placeholder="Dán khóa API bắt đầu bằng m2a_" autocomplete="off">
         <button class="ghost mini" onclick="saveKey()">Lưu</button>
@@ -800,16 +801,25 @@ function toast(msg, kind){
   setTimeout(() => d.remove(), 4000);
 }
 
+async function logout(){
+  try {
+    await api('/admin/logout', {method:'POST'});
+    localStorage.removeItem(KEY_STORE);
+    location.replace('/login');
+  } catch(e) { toast(e.message, 'bad'); }
+}
+
 async function api(path, opts){
   opts = opts || {};
-  opts.headers = Object.assign({'Content-Type':'application/json'}, opts.headers || {});
+  opts.headers = Object.assign({'Content-Type':'application/json', 'X-Admin-Request':'1'}, opts.headers || {});
   if (KEY) opts.headers['Authorization'] = 'Bearer ' + KEY;
   const r = await fetch(path, opts);
   const txt = await r.text();
   let data; try { data = JSON.parse(txt); } catch(e){ data = null; }
   if (r.status === 401){
     setAuth(false);
-    throw new Error('API Key chưa điền hoặc không chính xác');
+    location.replace('/login');
+    throw new Error('Phiên đăng nhập đã hết hạn');
   }
   setAuth(true);
   if (!r.ok) {

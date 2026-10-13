@@ -68,6 +68,10 @@ class Config:
     host: str = field(default_factory=lambda: _env("MUSE2API_HOST", "0.0.0.0"))
     port: int = field(default_factory=lambda: int(_env("MUSE2API_PORT", "18610")))
 
+    # Dashboard credentials; missing values keep administration locked.
+    admin_username: str = field(default_factory=lambda: _env("MUSE2API_ADMIN_USERNAME", ""))
+    admin_password: str = field(default_factory=lambda: _env("MUSE2API_ADMIN_PASSWORD", ""))
+
     # Browser
     chromium: str = field(default_factory=_detect_chromium)
     cdp_port: int = field(default_factory=lambda: int(_env("MUSE2API_CDP_PORT", "19210")))

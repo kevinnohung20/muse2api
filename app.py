@@ -29,6 +29,7 @@ import asyncio
 import base64
 import io
 import hashlib
+import secrets
 import json
 import logging
 import os
@@ -248,9 +249,13 @@ def resolve_model(name: str | None, default: str = "muse-image") -> str:
 
 
 # ------------------------- Authentication -------------------------
-def auth(authorization: str | None = Header(default=None)):
+def auth(request: Request, authorization: str | None = Header(default=None)):
+    if request.url.path.startswith("/admin"):
+        if getattr(request.state, "admin_authenticated", False):
+            return True
+        raise HTTPException(401, "Đăng nhập quản trị để tiếp tục")
     if not CFG.api_key:
-        return True
+        raise HTTPException(503, "API key not configured")
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(401, "Missing Authorization: Bearer <key>")
     parts = authorization.split(None, 1)
@@ -258,6 +263,86 @@ def auth(authorization: str | None = Header(default=None)):
     if not token or token != CFG.api_key:
         raise HTTPException(401, "Invalid API key")
     return True
+
+
+# ponytail: sessions and login throttle belong to one worker; use shared storage for multiple workers.
+_ADMIN_SESSIONS: dict[str, float] = {}
+_LOGIN_ATTEMPTS: list[float] = []
+_ADMIN_COOKIE = "muse2api_admin"
+
+
+@app.middleware("http")
+async def protect_admin(request: Request, call_next):
+    path = request.url.path
+    protected = path in ("/", "/admin", "/docs", "/redoc", "/openapi.json", "/readyz") or path.startswith(("/admin/", "/docs/"))
+    if protected:
+        now = time.time()
+        for token, expiry in list(_ADMIN_SESSIONS.items()):
+            if expiry <= now:
+                _ADMIN_SESSIONS.pop(token, None)
+        token = request.cookies.get(_ADMIN_COOKIE, "")
+        if token not in _ADMIN_SESSIONS:
+            if path in ("/", "/admin", "/admin/"):
+                return Response(status_code=303, headers={"Location": "/login", "Cache-Control": "no-store"})
+            return JSONResponse({"detail": "Đăng nhập quản trị để tiếp tục"}, status_code=401)
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            if origin != str(request.base_url).rstrip("/") or request.headers.get("x-admin-request") != "1":
+                return JSONResponse({"detail": "Invalid request origin"}, status_code=403)
+        request.state.admin_authenticated = True
+    response = await call_next(request)
+    if protected or path == "/login":
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return FileResponse(os.path.join(CFG.base_dir, "login.html"))
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(max_length=256)
+    password: str = Field(max_length=1024)
+
+
+@app.post("/login")
+async def login(payload: LoginRequest, request: Request):
+    if request.headers.get("origin") != str(request.base_url).rstrip("/"):
+        raise HTTPException(403, "Invalid request origin")
+    if not CFG.admin_username or not CFG.admin_password:
+        raise HTTPException(503, "Chưa cấu hình tài khoản quản trị trong .env")
+    now = time.time()
+    _LOGIN_ATTEMPTS[:] = [t for t in _LOGIN_ATTEMPTS if t > now - 60]
+    if len(_LOGIN_ATTEMPTS) >= 10:
+        raise HTTPException(429, "Thử quá nhiều lần. Vui lòng đợi 60 giây.")
+    _LOGIN_ATTEMPTS.append(now)
+    user_ok = secrets.compare_digest(payload.username.encode(), CFG.admin_username.encode())
+    password_ok = secrets.compare_digest(payload.password.encode(), CFG.admin_password.encode())
+    if not (user_ok and password_ok):
+        raise HTTPException(401, "Tên đăng nhập hoặc mật khẩu không đúng")
+    for token, expiry in list(_ADMIN_SESSIONS.items()):
+        if expiry <= now:
+            _ADMIN_SESSIONS.pop(token, None)
+    if len(_ADMIN_SESSIONS) >= 100:
+        _ADMIN_SESSIONS.pop(next(iter(_ADMIN_SESSIONS)))
+    _ADMIN_SESSIONS.pop(request.cookies.get(_ADMIN_COOKIE, ""), None)
+    token = secrets.token_urlsafe(32)
+    _ADMIN_SESSIONS[token] = now + 8 * 3600
+    response = JSONResponse({"ok": True})
+    response.set_cookie(_ADMIN_COOKIE, token, max_age=8 * 3600, httponly=True,
+                        secure=request.url.scheme == "https", samesite="strict")
+    return response
+
+
+@app.post("/admin/logout")
+async def logout(request: Request):
+    _ADMIN_SESSIONS.pop(request.cookies.get(_ADMIN_COOKIE, ""), None)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(_ADMIN_COOKIE)
+    return response
 
 
 # ------------------------- Request Models -------------------------

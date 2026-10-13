@@ -1,3 +1,12 @@
+## Đăng nhập quản trị
+
+- Tạo `.env` tại thư mục dự án với `MUSE2API_ADMIN_USERNAME` và `MUSE2API_ADMIN_PASSWORD` (mật khẩu mạnh, không để trống). Không commit file này.
+- Truy cập `/admin`; chưa đăng nhập sẽ chuyển tới `/login`. Đổi thông tin trong `.env` cần khởi động lại dịch vụ; Docker dùng `docker compose up -d --build --force-recreate`.
+- Phiên đăng nhập tồn tại 8 giờ, mất khi khởi động lại. Thiếu cấu hình sẽ khóa quản trị, không mở truy cập mặc định.
+- `MUSE2API_KEY` chỉ dùng API AI, không thay thế đăng nhập quản trị. Extension/userscript/CLI nhập cookie bằng API Key cũ không còn được cấp quyền; nhập cookie trực tiếp trong trang quản trị sau khi đăng nhập.
+- Khi public phải dùng HTTPS. Reverse proxy cần chuyển đúng Host, X-Forwarded-Proto; chỉ tin proxy do bạn quản lý. Phiên và giới hạn đăng nhập hiện dành cho một worker.
+
+
 # MUSE2API
 
 <p align="center">
