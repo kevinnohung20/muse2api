@@ -22,6 +22,7 @@ import time
 import uuid
 
 from cdp import CDP, http_json
+from proxy_relay import ProxyConfigError, ProxyRelayPool, validate_proxy_url
 
 log = logging.getLogger("muse2api")
 
@@ -50,6 +51,7 @@ class MuseEngine:
         self._active_contexts: set[str] = set()
         self._contexts_lock = threading.Lock()
         self._last_http_renew: dict[str, float] = {}
+        self._proxy_relays = ProxyRelayPool()
         self._log = None
         os.makedirs(cfg.profile_dir, exist_ok=True)
 
@@ -83,6 +85,14 @@ class MuseEngine:
     @current_context_id.setter
     def current_context_id(self, val: str | None):
         self._ensure_local().current_context_id = val
+
+    @property
+    def current_proxy_key(self) -> str:
+        return getattr(self._ensure_local(), "current_proxy_key", "")
+
+    @current_proxy_key.setter
+    def current_proxy_key(self, val: str):
+        self._ensure_local().current_proxy_key = val
 
     # ---------------- Browser Lifecycle ----------------
     def _debug_url(self):
@@ -165,6 +175,7 @@ class MuseEngine:
                 except Exception:  # noqa: BLE001
                     self.proc.kill()
             self.proc = None
+            self._proxy_relays.close()
 
     # ---------------- Page Management ----------------
     def _close_page(self):
@@ -186,13 +197,15 @@ class MuseEngine:
                 self._active_contexts.discard(ctx_id)
             self.current_context_id = None
         self.current_acc_id = None
+        self.current_proxy_key = ""
 
-    def _open_page(self):
+    def _open_page(self, proxy_server: str | None = None):
         """Create dedicated page for the current worker thread.
         Creates isolated incognito BrowserContext to ensure 100% cookie and session isolation across accounts."""
         if self.browser:
             try:
-                res = self.browser.send("Target.createBrowserContext")
+                params = {"proxyServer": proxy_server} if proxy_server else {}
+                res = self.browser.send("Target.createBrowserContext", params)
                 ctx_id = res.get("result", {}).get("browserContextId")
                 if ctx_id:
                     self.current_context_id = ctx_id
@@ -212,8 +225,21 @@ class MuseEngine:
                         page.send("Browser.setDownloadBehavior",
                                   {"behavior": "allow", "downloadPath": self.cfg.download_dir})
                         return page
+                    if proxy_server:
+                        raise MuseGenerationError(
+                            "Could not create a browser page for the configured proxy")
+                elif proxy_server:
+                    raise MuseGenerationError(
+                        "Could not create an isolated browser context for the configured proxy")
             except Exception as exc:
+                if proxy_server:
+                    raise MuseGenerationError(
+                        "Could not create an isolated browser context for the configured proxy") from exc
                 log.warning("Target.createBrowserContext failed, falling back to regular tab: %s", exc)
+
+        if proxy_server:
+            raise MuseGenerationError(
+                "Could not apply the configured proxy because the isolated browser context is unavailable")
 
         import requests
         tgt = requests.put(
@@ -227,9 +253,9 @@ class MuseEngine:
                   {"behavior": "allow", "downloadPath": self.cfg.download_dir})
         return page
 
-    @staticmethod
-    def renew_session_http(cookies: dict, expires: dict | None = None,
-                           wake_vm: bool = True) -> dict:
+    def renew_session_http(self, cookies: dict, expires: dict | None = None,
+                           wake_vm: bool = True,
+                           proxy_url: str | None = None) -> dict:
         """Call muse.ai/api/session to renew hatch_vml (+48h) / hatch_sess (+30d) / hatch_gw (+1y),
         and call /api/hatch/vm/wake to wake the cloud workspace VM as needed."""
         import requests
@@ -244,9 +270,25 @@ class MuseEngine:
             "Sec-Fetch-Dest": "empty",
             "Cookie": "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v),
         }
+        request_options = {}
+        if proxy_url:
+            try:
+                relay = self._proxy_relays.get(proxy_url)
+            except ProxyConfigError as exc:
+                raise MuseGenerationError(str(exc)) from exc
+            request_options["proxies"] = {
+                "http": relay.url, "https": relay.url}
+
+        def upstream_request(method: str, url: str, **kwargs):
+            with requests.Session() as session:
+                if proxy_url:
+                    session.trust_env = False
+                return session.request(method, url, **kwargs)
+
         try:
-            r = requests.get("https://muse.ai/api/session", headers=headers,
-                             timeout=12, allow_redirects=False)
+            r = upstream_request(
+                "GET", "https://muse.ai/api/session", headers=headers,
+                timeout=12, allow_redirects=False, **request_options)
         except requests.RequestException as exc:
             # Do not echo request details: exception may contain proxy credentials.
             raise MuseGenerationError(
@@ -274,11 +316,12 @@ class MuseEngine:
         if wake_vm and vm_id and vm_state != "DISABLED":
             try:
                 headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v)
-                rw = requests.post("https://muse.ai/api/hatch/vm/wake", headers=headers, json={
+                rw = upstream_request("POST", "https://muse.ai/api/hatch/vm/wake",
+                    headers=headers, json={
                     "vm_id": vm_id,
                     "retry_count": 0,
                     "connect_attempt_id": str(uuid.uuid4()),
-                }, timeout=8)
+                }, timeout=8, **request_options)
                 wake_ok = rw.status_code == 200
             except Exception:
                 pass
@@ -409,8 +452,16 @@ class MuseEngine:
         except Exception:
             pass
 
-    def ensure_page(self, cookies: dict, expires: dict | None = None, account_id: str | None = None):
-        if self.page is not None and (account_id is None or getattr(self, "current_acc_id", None) == account_id):
+    def ensure_page(self, cookies: dict, expires: dict | None = None,
+                    account_id: str | None = None, proxy_url: str | None = None):
+        try:
+            normalized_proxy = validate_proxy_url(proxy_url) if proxy_url else ""
+            proxy_server = self._proxy_relays.get(normalized_proxy).url if normalized_proxy else None
+        except ProxyConfigError as exc:
+            raise MuseGenerationError(str(exc)) from exc
+        if (self.page is not None
+                and (account_id is None or self.current_acc_id == account_id)
+                and self.current_proxy_key == normalized_proxy):
             try:
                 if self.page.js("!!document.querySelector('textarea')"):
                     return self.page
@@ -425,7 +476,8 @@ class MuseEngine:
         now_ts = time.time()
         if not account_id or (now_ts - last_map.get(account_id, 0) > 600):
             try:
-                renewed = self.renew_session_http(cookies, expires, wake_vm=True)
+                renewed = self.renew_session_http(
+                    cookies, expires, wake_vm=True, proxy_url=normalized_proxy or None)
                 if renewed.get("cookies"):
                     cookies = renewed["cookies"]
                 if renewed.get("cookies_exp"):
@@ -437,7 +489,7 @@ class MuseEngine:
             except Exception as e:
                 log.warning("Pre-renewal via /api/session failed (continuing to browser load): %s", e)
 
-        page = self._open_page()
+        page = self._open_page(proxy_server=proxy_server)
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
         for _ in range(self.cfg.login_wait * 2):
@@ -446,6 +498,7 @@ class MuseEngine:
                 if page.js("!!document.querySelector('textarea')"):
                     self.page = page
                     self.current_acc_id = account_id
+                    self.current_proxy_key = normalized_proxy
                     self._wait_ws_ready(page, timeout=15.0)
                     return page
             except Exception:
@@ -454,6 +507,7 @@ class MuseEngine:
             if page.js("!!document.querySelector('textarea')"):
                 self.page = page
                 self.current_acc_id = account_id
+                self.current_proxy_key = normalized_proxy
                 self._wait_ws_ready(page, timeout=15.0)
                 return page
         except Exception:  # noqa: BLE001
@@ -473,9 +527,11 @@ class MuseEngine:
         """Explicitly release page and isolated context held by current thread."""
         self._close_page()
 
-    def refresh(self, cookies: dict, expires: dict | None = None):
+    def refresh(self, cookies: dict, expires: dict | None = None,
+                account_id: str | None = None, proxy_url: str | None = None):
         self._close_page()
-        return self.ensure_page(cookies, expires)
+        return self.ensure_page(cookies, expires, account_id=account_id,
+                                proxy_url=proxy_url)
 
     # ---------------- Quota Query (Settings Modal) ----------------
     # Quota is located in Settings Menu -> Settings -> General -> Usage section, e.g.:
@@ -497,9 +553,11 @@ class MuseEngine:
         "return JSON.stringify({x:Math.round(r.x+r.width/2),"
         "y:Math.round(r.y+r.height/2)});})()")
 
-    def quota(self, cookies: dict, expires: dict | None = None) -> dict:
+    def quota(self, cookies: dict, expires: dict | None = None,
+              account_id: str | None = None, proxy_url: str | None = None) -> dict:
         """Open Settings panel to read quota. Returns structured dict; raises on error."""
-        self.ensure_page(cookies, expires)
+        self.ensure_page(cookies, expires, account_id=account_id,
+                         proxy_url=proxy_url)
         p = self.page
         time.sleep(1)
 
@@ -932,10 +990,11 @@ class MuseEngine:
 
     def chat_stream(self, cookies: dict, prompt: str, expires: dict | None = None,
                     timeout: int | None = None, account_id: str | None = None,
-                    stop_event=None):
+                    stop_event=None, proxy_url: str | None = None):
         """Send a message and stream yield incremental text."""
         timeout = int(timeout or getattr(self.cfg, "chat_timeout", 300))
-        self.ensure_page(cookies, expires, account_id=account_id)
+        self.ensure_page(cookies, expires, account_id=account_id,
+                         proxy_url=proxy_url)
         self.reset_thread(for_chat=True)
         base_agent, base_text, _ = self._poll_chat()
         self._send(prompt)
@@ -1000,10 +1059,12 @@ class MuseEngine:
         raise MuseGenerationError("Timed out waiting for assistant response")
 
     def chat(self, cookies: dict, prompt: str, expires: dict | None = None,
-             timeout: int | None = None, account_id: str | None = None) -> str:
+             timeout: int | None = None, account_id: str | None = None,
+             proxy_url: str | None = None) -> str:
         """Send a message and return complete response text (non-streaming)."""
         out = ""
-        for chunk in self.chat_stream(cookies, prompt, expires, timeout, account_id=account_id):
+        for chunk in self.chat_stream(cookies, prompt, expires, timeout,
+                                      account_id=account_id, proxy_url=proxy_url):
             out += chunk
         return out
 
@@ -1191,8 +1252,9 @@ class MuseEngine:
     def generate(self, cookies: dict, prompt: str, expect: str = "image",
                  timeout: int = 240, expires: dict | None = None, account_id: str | None = None,
                  on_progress=None, reference_image: str | None = None,
-                 stop_event=None) -> dict:
-        self.ensure_page(cookies, expires, account_id=account_id)
+                 stop_event=None, proxy_url: str | None = None) -> dict:
+        self.ensure_page(cookies, expires, account_id=account_id,
+                         proxy_url=proxy_url)
         self.reset_thread(for_chat=False)
         self._scroll_bottom()
         if reference_image:

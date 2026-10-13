@@ -112,6 +112,7 @@ class Store:
                    if _is_pos(v)}
             now = int(time.time())
             acc = {"id": aid, "label": label or aid, "cookies": cookies,
+                   "proxy_url": "",
                    "cookies_exp": exp, "expires_at": account_expiry(exp, now),
                    "expiry_anchor": None,
                    "enabled": True, "created_at": now,
@@ -124,7 +125,9 @@ class Store:
     def list_accounts(self) -> list[dict]:
         out = []
         for a in self.accounts:
-            item = {k: v for k, v in a.items() if k != "cookies"}
+            item = {k: v for k, v in a.items()
+                    if k not in ("cookies", "proxy_url")}
+            item["proxy_configured"] = bool(a.get("proxy_url"))
             ce = a.get("cookies_exp") or {}
             if _is_pos(ce.get("hatch_vml")):
                 item["expires_at"] = int(ce["hatch_vml"])
@@ -230,7 +233,7 @@ class Store:
             for a in self.accounts:
                 if a["id"] == aid:
                     for k, v in kw.items():
-                        if v is not None:
+                        if v is not None or k == "proxy_url":
                             a[k] = v
                     if "cookies_exp" in kw and kw["cookies_exp"] is not None:
                         ce = a["cookies_exp"]

@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 
 from config import CFG
 from engine import ESSENTIAL_COOKIES, MuseAuthError, MuseEngine, MuseGenerationError
+from proxy_relay import ProxyConfigError, validate_proxy_url
 from store import Store, account_expiry, min_expiry
 
 import sys
@@ -275,7 +276,9 @@ def _renew_and_persist(acc_id: str, wake_vm: bool = True, force: bool = False) -
         engine._last_http_renew[acc_id] = last_sync
         return acc
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm)
+        res = engine.renew_session_http(
+            acc["cookies"], acc.get("cookies_exp"), wake_vm=wake_vm,
+            proxy_url=acc.get("proxy_url") or None)
         engine._last_http_renew[acc_id] = now
         if res.get("cookies"):
             store.update_account(acc_id, cookies=res["cookies"],
@@ -342,7 +345,8 @@ def safe_chat_stream(cookies: dict, prompt: str, expires: dict | None,
                         engine.start()
                         for chunk in engine.chat_stream(
                             cur_cookies, prompt, cur_exp, timeout,
-                            account_id=cur_id, stop_event=stop_event
+                            account_id=cur_id, stop_event=stop_event,
+                            proxy_url=(store.get_account(cur_id) or {}).get("proxy_url")
                         ):
                             yielded = True
                             q.put(("data", chunk))
@@ -467,6 +471,7 @@ class AccountRequest(BaseModel):
 class AccountPatch(BaseModel):
     label: str | None = None
     enabled: bool | None = None
+    proxy_url: str | None = None
 
 
 # ------------------------- Prompt Construction -------------------------
@@ -860,7 +865,8 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                 res = engine.generate(cur_acc["cookies"], prompt, expect=kind,
                                       timeout=remaining, expires=cur_acc.get("cookies_exp"),
                                       account_id=cur_acc["id"], on_progress=on_progress,
-                                      reference_image=reference_image)
+                                      reference_image=reference_image,
+                                      proxy_url=cur_acc.get("proxy_url"))
                 store.mark(cur_acc["id"], True, "")
                 _sync_cookies(cur_acc["id"])
                 return res, cur_acc["id"]
@@ -1540,11 +1546,20 @@ def add_account(req: AccountRequest, _=Depends(auth)):
 
 @app.patch("/admin/accounts/{aid}")
 def patch_account(aid: str, req: AccountPatch, _=Depends(auth)):
-    acc = store.update_account(aid, label=req.label, enabled=req.enabled)
+    updates = {"label": req.label, "enabled": req.enabled}
+    if "proxy_url" in req.model_fields_set:
+        try:
+            updates["proxy_url"] = (
+                validate_proxy_url(req.proxy_url) if req.proxy_url else "")
+        except ProxyConfigError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    acc = store.update_account(aid, **updates)
     if not acc:
         raise HTTPException(404, "Account not found")
-    return {k: v for k, v in acc.items() if k != "cookies"} | {
-        "cookie_count": len(acc.get("cookies", {}))}
+    return {k: v for k, v in acc.items()
+            if k not in ("cookies", "proxy_url")} | {
+        "cookie_count": len(acc.get("cookies", {})),
+        "proxy_configured": bool(acc.get("proxy_url"))}
 
 
 @app.delete("/admin/accounts/{aid}")
@@ -1568,12 +1583,15 @@ async def test_account(aid: str, _=Depends(auth)):
         with GEN_LOCK:
             try:
                 engine.start()
-                engine.refresh(acc["cookies"], acc.get("cookies_exp"))
+                engine.refresh(
+                    acc["cookies"], acc.get("cookies_exp"),
+                    account_id=aid, proxy_url=acc.get("proxy_url"))
                 synced = _sync_cookies(aid)
                 quota = None
                 try:  # Refresh quota if available
                     quota = engine.quota(acc["cookies"],
-                                         acc.get("cookies_exp"))
+                                         acc.get("cookies_exp"), account_id=aid,
+                                         proxy_url=acc.get("proxy_url"))
                     quota["checked_at"] = int(time.time())
                     store.update_account(aid, quota=quota)
                 except Exception:  # noqa: BLE001
@@ -1627,7 +1645,8 @@ def relogin(_=Depends(auth)):
         raise HTTPException(400, "No available accounts")
     try:
         engine.start()
-        engine.refresh(acc["cookies"], acc.get("cookies_exp"))
+        engine.refresh(acc["cookies"], acc.get("cookies_exp"),
+                       account_id=acc["id"], proxy_url=acc.get("proxy_url"))
         return {"ok": True, "account": acc["id"]}
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
@@ -1651,7 +1670,8 @@ async def query_quota(aid: str, _=Depends(auth)):
     def _probe():
         with GEN_LOCK:
             engine.start()
-            q = engine.quota(acc["cookies"], acc.get("cookies_exp"))
+            q = engine.quota(acc["cookies"], acc.get("cookies_exp"),
+                             account_id=aid, proxy_url=acc.get("proxy_url"))
             q["checked_at"] = int(time.time())
             store.update_account(aid, quota=q)
             return q
@@ -1882,7 +1902,9 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
     if not acc or not acc.get("cookies"):
         return {"ok": False, "id": aid, "label": (acc or {}).get("label", aid), "error": "Account has no valid cookies"}
     try:
-        res = engine.renew_session_http(acc["cookies"], acc.get("cookies_exp"), wake_vm=True)
+        res = engine.renew_session_http(
+            acc["cookies"], acc.get("cookies_exp"), wake_vm=True,
+            proxy_url=acc.get("proxy_url") or None)
         store.update_account(
             aid,
             cookies=res["cookies"],
@@ -1896,7 +1918,9 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
         if check_quota and GEN_LOCK.acquire(blocking=False):
             try:
                 engine.start()
-                quota = engine.quota(res["cookies"], res["cookies_exp"])
+                quota = engine.quota(
+                    res["cookies"], res["cookies_exp"], account_id=aid,
+                    proxy_url=acc.get("proxy_url"))
                 quota["checked_at"] = int(time.time())
                 store.update_account(aid, quota=quota)
             except Exception as qe:  # noqa: BLE001
@@ -1984,7 +2008,9 @@ def _warmup_browser_sync():
         log.info("[Browser Warmup] Pre-warming standby tab for account %s (%s)...", acc.get("label"), acc["id"])
         refreshed = _renew_and_persist(acc["id"], wake_vm=True, force=False) or acc
         engine.start()
-        engine.ensure_page(refreshed["cookies"], refreshed.get("cookies_exp"), account_id=acc["id"])
+        engine.ensure_page(
+            refreshed["cookies"], refreshed.get("cookies_exp"),
+            account_id=acc["id"], proxy_url=refreshed.get("proxy_url"))
         log.info("[Browser Warmup] Standby tab and WebSocket ready for account %s (%s)", acc.get("label"), acc["id"])
     except Exception as exc:  # noqa: BLE001
         log.warning("[Browser Warmup] Warmup exception: %s", exc)

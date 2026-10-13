@@ -351,13 +351,26 @@
       <div class="hint">Hệ thống đã bật <b>chế độ duy trì chạy ngầm mỗi 30 phút</b> và <b>xoay vòng công bằng nhiều tài khoản (LRU)</b>; "Kiểm tra" sẽ mở muse.ai thực tế để xác thực phiên.</div>
       <div class="tblwrap"><table>
         <thead><tr>
-          <th>Nhãn</th><th>ID Tài khoản</th><th>Trạng thái</th><th>Hạn dùng</th><th>Hạn mức</th><th>Kích hoạt</th><th>Cookie</th>
+          <th>Nhãn</th><th>ID Tài khoản</th><th>Trạng thái</th><th>Hạn dùng</th><th>Hạn mức</th><th>Kích hoạt</th><th>Cookie</th><th>Proxy</th>
           <th>Dùng gần nhất</th><th>Ghi chú</th><th style="min-width:250px">Thao tác</th>
         </tr></thead>
-        <tbody id="poolBody"><tr><td colspan="10" class="empty">Đang tải…</td></tr></tbody>
+        <tbody id="poolBody"><tr><td colspan="11" class="empty">Đang tải…</td></tr></tbody>
       </table></div>
     </div>
   </section>
+
+  <dialog id="proxyDialog" onclose="proxyAccountId=null;$('accountProxyUrl').value=''" style="max-width:540px;width:calc(100% - 32px);border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);padding:22px">
+    <form onsubmit="saveAccountProxy(event)">
+      <h3 style="margin-top:0">Proxy cho tài khoản</h3>
+      <p class="hint">Gán proxy cố định cho mọi lượt chat, ảnh, video và duy trì tài khoản này. Hỗ trợ HTTP, HTTPS, SOCKS5; URL có thể kèm username/password. Ví dụ: <code>http://user:pass@host:port</code> hoặc <code>socks5://user:pass@host:port</code>. Ký tự đặc biệt trong thông tin đăng nhập cần URL-encode. Thông tin proxy được lưu trong <code>data/accounts.json</code> cùng cookie; hãy giới hạn quyền truy cập file dữ liệu.</p>
+      <label for="accountProxyUrl">Proxy URL (để trống để gỡ proxy)</label>
+      <input id="accountProxyUrl" type="password" autocomplete="new-password" spellcheck="false" style="width:100%;margin:8px 0 16px" placeholder="socks5://username:password@proxy.example:1080">
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button type="button" class="ghost" onclick="$('proxyDialog').close()">Hủy</button>
+        <button type="submit" class="primary-lg">Lưu proxy</button>
+      </div>
+    </form>
+  </dialog>
 
   <!-- ==================== Lấy Cookie ==================== -->
   <section class="tab" id="tab-cookie">
@@ -1043,7 +1056,7 @@ async function loadPool(){
     }
 
     if (!accounts.length){
-      $('poolBody').innerHTML = '<tr><td colspan="10" class="empty">Chưa có tài khoản nào. Hãy chuyển sang tab "Lấy Cookie" theo 3 bước để thêm tài khoản</td></tr>';
+      $('poolBody').innerHTML = '<tr><td colspan="11" class="empty">Chưa có tài khoản nào. Hãy chuyển sang tab "Lấy Cookie" theo 3 bước để thêm tài khoản</td></tr>';
       return;
     }
     $('poolBody').innerHTML = accounts.map(a => {
@@ -1061,6 +1074,7 @@ async function loadPool(){
         <td>${quotaBadge(a)}</td>
         <td>${a.enabled ? '<span class="badge ok">Bật</span>' : '<span class="badge mute">Tắt</span>'}</td>
         <td class="mono">${a.cookie_count}</td>
+        <td>${a.proxy_configured ? '<span class="badge ok">Đã gán</span>' : '<span class="badge mute">Mặc định</span>'}</td>
         <td class="mono" title="${a.last_used ? fmtTime(a.last_used) : ''}">${ago(a.last_used)}</td>
         <td class="mono ellip" title="${esc(a.note||'')}">${esc(a.note || '—')}</td>
         <td><div class="acts">
@@ -1070,14 +1084,15 @@ async function loadPool(){
           <button class="ghost mini" onclick="toggleAcc('${a.id}', ${!a.enabled})">${a.enabled ? 'Vô hiệu' : 'Kích hoạt'}</button>
           <button class="ghost mini" onclick="renameAcc('${a.id}','${esc(a.label)}')">Đổi tên</button>
           <button class="ghost mini" onclick="updateCookies('${a.id}')">Cập nhật Cookie</button>
+          <button class="ghost mini" onclick="configureAccountProxy('${a.id}')">Proxy</button>
           <button class="danger mini" onclick="delAcc('${a.id}','${esc(a.label)}')">Xóa</button>
         </div></td>
       </tr>`;
     }).join('');
   }catch(e){
     $('poolBody').innerHTML = authOK === false
-      ? '<tr><td colspan="10" class="empty">🔑 Vui lòng nhập API Key ở góc trên bên phải và nhấn "Lưu"</td></tr>'
-      : `<tr><td colspan="10" class="empty">Tải thất bại: ${esc(e.message)}</td></tr>`;
+      ? '<tr><td colspan="11" class="empty">🔑 Vui lòng nhập API Key ở góc trên bên phải và nhấn "Lưu"</td></tr>'
+      : `<tr><td colspan="11" class="empty">Tải thất bại: ${esc(e.message)}</td></tr>`;
   }
 }
 
@@ -1157,6 +1172,28 @@ async function updateCookies(id){
     const r = await api(`/admin/accounts/${id}/cookies`, {method:'POST', body: JSON.stringify({cookie_header: v.trim()})});
     toast(`Đã cập nhật Cookie (${r.cookie_count} mục)`, 'ok'); loadPool();
   }catch(e){ toast('Cập nhật thất bại: ' + e.message, 'bad'); }
+}
+
+let proxyAccountId = null;
+function configureAccountProxy(id){
+  proxyAccountId = id;
+  $('accountProxyUrl').value = '';
+  $('proxyDialog').showModal();
+  $('accountProxyUrl').focus();
+}
+
+async function saveAccountProxy(event){
+  event.preventDefault();
+  if (!proxyAccountId) return;
+  const proxyUrl = $('accountProxyUrl').value.trim();
+  try{
+    const r = await api(`/admin/accounts/${proxyAccountId}`, {
+      method:'PATCH', body: JSON.stringify({proxy_url: proxyUrl || null})
+    });
+    $('proxyDialog').close();
+    toast(r.proxy_configured ? 'Đã lưu proxy cho tài khoản' : 'Đã gỡ proxy; tài khoản dùng kết nối mặc định', 'ok');
+    loadPool();
+  }catch(e){ toast('Lưu proxy thất bại: ' + e.message, 'bad'); }
 }
 
 async function delAcc(id, label){
