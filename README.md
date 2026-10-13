@@ -277,20 +277,13 @@ curl -X POST "http://localhost:18610/v1/images/generations" \
 本项目基于 [MIT License](LICENSE) 开源发布。
 
 
-## 媒体选择回归测试
+## Kiểm thử hồi quy video
 
-修复上传参考图被误判为生成结果、下载过程被页面其他媒体覆盖的问题。
-测试使用独立临时 Chromium profile 和本地合成 DOM，不访问 Muse、不读取账号、不会消耗生成额度。
-安装项目依赖和 Chromium 后，从仓库根目录运行：
+Giữ một kiểm thử offline cho trạng thái sẵn sàng, retry khi chưa gửi được và tránh hủy video đã được xác nhận. Cần Python, dependency của dự án và Node.js; không dùng tài khoản thật.
 
-```bash
-python tests/test_media_selection.py
+```powershell
+python "d:\router-platform\muse2api\tests\test_muse_video_delivery.py"
 ```
-
-如浏览器不在 PATH，可设置 `MUSE2API_CHROMIUM` 为可执行文件路径。
-覆盖上传预览排除、结果去重、历史附件排除、精确来源下载、视频来源保持、
-禁止全局下载回退，以及参考图读取失败时中止。最终图片编辑效果仍需通过真实接口验收。
-
 
 ## v1.5.2：反向代理/CDN 后的长耗时生图
 
@@ -306,13 +299,6 @@ python tests/test_media_selection.py
 `timeout` 为排队及生成等待预算（1–600 秒），浏览器初始化与取回另有各自超时；客户端应继续轮询任务终态。
 任务元数据持久化；进程重启时尚未完成的图片任务标记失败，不会悄悄再次生成。
 管理页图片接口测试也已改为任务轮询。
-
-回归检查（不消耗真实生成额度）：
-
-```bash
-python tests/test_async_images.py
-python tests/test_vm_wait.py engine.py --assert
-```
 
 修复共享浏览器异常处理在解锁后重置其他任务的竞争；不再把页面侧栏残留的
 `Connecting...` / `Still sending` 文本当作当前生图在 16 秒内失败的证据。
@@ -332,8 +318,12 @@ python tests/test_vm_wait.py engine.py --assert
 
 裸机 Git 部署：`git pull --ff-only` 后重启对应服务；Docker Compose：`git pull --ff-only && docker compose up -d --build`。请先保存本地自定义修改，保留 `.env` 与 `data/`。
 
-不使用真实账号、不消耗生成额度的回归测试：
+# MUSE2API 1.6.1
 
-```bash
-python tests/test_session_health.py
-```
+## 更新说明（2026-10-13）
+
+- 修复多账号额度查询串读：额度查询绑定对应账号的浏览器页面，避免不同账号之间显示错误余额和用量。
+- 额度读取失败或未读到有效数据时保留旧缓存，并明确报告读取失败，避免将无效结果当成实时额度。
+- 修复保活成功误报：区分唤醒请求已接受与 VM 已运行，只有复核状态为 RUNNING 才报告唤醒成功。
+- 管理页显示额度查询时间和过期提示；账号测试分别反馈会话有效性与额度读取状态。
+- 新增离线回归测试，覆盖账号额度隔离及 VM 唤醒状态确认。

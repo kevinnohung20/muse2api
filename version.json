@@ -1,10 +1,12 @@
 {
-  "version": "1.6.0",
-  "updated_at": "2026-10-11",
+  "version": "1.6.1",
+  "updated_at": "2026-10-13",
   "repo": "https://github.com/czg86389-hub/muse2api",
   "highlights": [
-    "Support true multi-account parallel concurrent execution (isolated via independent Chromium BrowserContext incognito containers, zero Cookie/Session contamination between accounts)",
-    "Intelligent account pool scheduler and concurrency lock (supports configurable slot limit via MUSE2API_CONCURRENCY, per-account mutex to prevent collisions, automatic multi-account parallel dispatch)",
-    "Merged community PR #18: Accurately distinguish video vs cover static frame matching logic, completely eliminating the issue of returning static images instead of videos"
+    "Sửa tra cứu hạn mức nhầm tài khoản; giữ cache cũ khi không đọc được dữ liệu hợp lệ.",
+    "Chỉ báo đánh thức VM thành công khi xác nhận trạng thái RUNNING.",
+    "Hiển thị thời gian tra cứu hạn mức, cảnh báo dữ liệu cũ; tách kết quả phiên và hạn mức.",
+    "Cải thiện lịch duy trì, trạng thái sẵn sàng và retry video.",
+    "Giữ proxy riêng theo tài khoản và giao diện tiếng Việt; bổ sung kiểm thử hồi quy."
   ]
 }

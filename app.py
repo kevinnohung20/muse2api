@@ -123,7 +123,7 @@ class AccountPoolManager:
 
     def acquire(self, account_id: str | None = None, preferred_id: str | None = None,
                 rotate: bool = True, force_rotate: bool = False,
-                timeout: float = 60.0) -> dict:
+                timeout: float = 60.0, record_use: bool = True) -> dict:
         deadline = time.monotonic() + timeout
         with self.cond:
             while True:
@@ -144,7 +144,8 @@ class AccountPoolManager:
                         preferred_id=pref,
                         rotate=rotate,
                         force_rotate=force_rotate,
-                        exclude_ids=self.busy_accounts
+                        exclude_ids=self.busy_accounts,
+                        record_use=record_use,
                     )
                     if acc:
                         self.busy_accounts.add(acc["id"])
@@ -828,8 +829,19 @@ def _run_generation_locked(prompt: str, kind: str, timeout: int,
                     account_id: str | None = None, on_progress=None,
                     reference_image: str | None = None, deadline=None) -> tuple[dict, str | None]:
     remaining_wait = int(deadline - time.monotonic()) if deadline is not None else timeout
+    preferred_id = getattr(engine, "current_acc_id", None)
+    if kind == "video" and not account_id:
+        # Prefer the last account that completed a video; session health alone is insufficient.
+        recent = sorted(list(store.tasks.values()), key=lambda task: task.get("created_at", 0), reverse=True)
+        for task in recent:
+            if task.get("kind") != "video" or task.get("status") != "completed" or not task.get("account"):
+                continue
+            candidate = store.get_account(task["account"])
+            if candidate and candidate.get("enabled", True) and candidate.get("ok") is not False:
+                preferred_id = candidate["id"]
+                break
     acc = ACCOUNT_POOL.acquire(account_id=account_id,
-                               preferred_id=getattr(engine, "current_acc_id", None),
+                               preferred_id=preferred_id,
                                timeout=max(1, remaining_wait))
     cur_acc = acc
     last_exc = None
@@ -1588,17 +1600,22 @@ async def test_account(aid: str, _=Depends(auth)):
                     account_id=aid, proxy_url=acc.get("proxy_url"))
                 synced = _sync_cookies(aid)
                 quota = None
-                try:  # Refresh quota if available
+                quota_error = None
+                try:  # Session validity and quota readability are independent results.
                     quota = engine.quota(acc["cookies"],
-                                         acc.get("cookies_exp"), account_id=aid,
-                                         proxy_url=acc.get("proxy_url"))
-                    quota["checked_at"] = int(time.time())
-                    store.update_account(aid, quota=quota)
-                except Exception:  # noqa: BLE001
-                    quota = None
-                store.mark(aid, True, "Session valid")
-                return {"ok": True, "message": "Session valid, ready to generate",
-                        "synced": synced, "quota": quota}
+                                         acc.get("cookies_exp"), account_id=aid, proxy_url=acc.get("proxy_url"))
+                    if quota.get("found"):
+                        quota["checked_at"] = int(time.time())
+                        store.update_account(aid, quota=quota)
+                    else:
+                        quota_error = "Không đọc được hạn mức hợp lệ; giữ nguyên cache cũ"
+                        quota = None
+                except Exception as exc:  # noqa: BLE001
+                    quota_error = f"{type(exc).__name__}; Chưa cập nhật cache hạn mức"
+                store.mark(aid, True, "Phiên hợp lệ" + ("; Không đọc được hạn mức" if quota_error else ""))
+                return {"ok": True, "message": "Phiên hợp lệ, sẵn sàng tạo nội dung",
+                        "synced": synced, "quota": quota,
+                        "quota_error": quota_error}
             except MuseAuthError as exc:
                 store.mark(aid, False, str(exc)[:200])
                 return {"ok": False, "message": str(exc)[:200]}
@@ -1670,8 +1687,9 @@ async def query_quota(aid: str, _=Depends(auth)):
     def _probe():
         with GEN_LOCK:
             engine.start()
-            q = engine.quota(acc["cookies"], acc.get("cookies_exp"),
-                             account_id=aid, proxy_url=acc.get("proxy_url"))
+            q = engine.quota(acc["cookies"], acc.get("cookies_exp"), account_id=aid, proxy_url=acc.get("proxy_url"))
+            if not q.get("found"):
+                raise MuseGenerationError("Không đọc được hạn mức hợp lệ; giữ nguyên cache cũ")
             q["checked_at"] = int(time.time())
             store.update_account(aid, quota=q)
             return q
@@ -1918,9 +1936,10 @@ def _probe_account_sync(aid: str, check_quota: bool = False) -> dict:
         if check_quota and GEN_LOCK.acquire(blocking=False):
             try:
                 engine.start()
-                quota = engine.quota(
-                    res["cookies"], res["cookies_exp"], account_id=aid,
-                    proxy_url=acc.get("proxy_url"))
+                quota = engine.quota(res["cookies"], res["cookies_exp"],
+                                     account_id=aid, proxy_url=acc.get("proxy_url"))
+                if not quota.get("found"):
+                    raise MuseGenerationError("Không đọc được hạn mức hợp lệ; giữ nguyên cache cũ")
                 quota["checked_at"] = int(time.time())
                 store.update_account(aid, quota=quota)
             except Exception as qe:  # noqa: BLE001
@@ -1966,10 +1985,10 @@ async def run_keepalive_all(force: bool = False) -> dict:
 
                 needs_run = (
                     force
-                    or not exp_at
-                    or (exp_at - now < 36 * 3600)
-                    or ((now - last_ka) > 15 * 60)
-                    or (a.get("ok") is not True)
+                    or not last_ka
+                    or ((now - last_ka) > 6 * 3600 and
+                        (not exp_at or exp_at - now < 36 * 3600 or
+                         a.get("ok") is not True))
                 )
                 if not needs_run:
                     skipped.append({"id": aid, "label": label, "reason": "Session valid and recently refreshed"})
@@ -1999,13 +2018,12 @@ def _warmup_browser_sync():
     """Pre-warm browser and WebSocket connection in background."""
     if getattr(engine, "current_acc_id", None) and engine.page is not None:
         return
-    acc = store.pick_account(rotate=False)
-    if not acc or not acc.get("cookies"):
-        return
     if not GEN_LOCK.acquire(blocking=False):
         return
+    acc = None
     try:
-        log.info("[Browser Warmup] Pre-warming standby tab for account %s (%s)...", acc.get("label"), acc["id"])
+        acc = ACCOUNT_POOL.acquire(rotate=False, timeout=0.1, record_use=False)
+        log.info("【浏览器预热】正在后台预热账号 %s (%s) 的热备标签页...", acc.get("label"), acc["id"])
         refreshed = _renew_and_persist(acc["id"], wake_vm=True, force=False) or acc
         engine.start()
         engine.ensure_page(
@@ -2015,6 +2033,10 @@ def _warmup_browser_sync():
     except Exception as exc:  # noqa: BLE001
         log.warning("[Browser Warmup] Warmup exception: %s", exc)
     finally:
+        # Warmup runs in a worker thread; do not retain its account reservation or page.
+        engine.close_current_page()
+        if acc:
+            ACCOUNT_POOL.release(acc["id"])
         GEN_LOCK.release()
 
 
@@ -2029,8 +2051,6 @@ async def _keepalive_loop():
     while True:
         try:
             await run_keepalive_all(force=False)
-            if not getattr(engine, "current_acc_id", None) or engine.page is None:
-                await asyncio.to_thread(_warmup_browser_sync)
         except Exception as e:  # noqa: BLE001
             log.error("[Keepalive Daemon] Polling exception: %s", e)
         await asyncio.sleep(900)

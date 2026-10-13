@@ -148,7 +148,8 @@ class Store:
 
     def pick_account(self, preferred_id: str | None = None, rotate: bool = True,
                      force_rotate: bool = False, exclude_id: str | None = None,
-                     exclude_ids: set[str] | list[str] | None = None) -> dict | None:
+                     exclude_ids: set[str] | list[str] | None = None,
+                     record_use: bool = True) -> dict | None:
         """Select available account: prioritize reusing currently warm healthy account,
         auto-rotate after 15 uses or on error.
         exclude_ids: set of account IDs to exclude (e.g., currently locked by other concurrent threads).
@@ -176,9 +177,10 @@ class Store:
                         if not rotate or sticky_n < 15:
                             self._sticky_id = preferred_id
                             self._sticky_count = sticky_n + 1
-                            a["last_used"] = time.time()
-                            a["use_count"] = a.get("use_count", 0) + 1
-                            _write(self.cfg.accounts_file, self.accounts)
+                            if record_use:
+                                a["last_used"] = time.time()
+                                a["use_count"] = a.get("use_count", 0) + 1
+                                _write(self.cfg.accounts_file, self.accounts)
                             return a
             healthy = [a for a in live if a.get("ok") is not False]
             candidates = healthy if healthy else live
@@ -186,9 +188,10 @@ class Store:
             acc = candidates[0]
             self._sticky_id = acc["id"]
             self._sticky_count = 1
-            acc["last_used"] = time.time()
-            acc["use_count"] = acc.get("use_count", 0) + 1
-            _write(self.cfg.accounts_file, self.accounts)
+            if record_use:
+                acc["last_used"] = time.time()
+                acc["use_count"] = acc.get("use_count", 0) + 1
+                _write(self.cfg.accounts_file, self.accounts)
             return acc
 
     def touch_keepalive(self, aid: str, ok: bool | None = True, note: str = ""):

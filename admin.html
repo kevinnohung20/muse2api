@@ -981,7 +981,9 @@ function quotaBadge(a){
   if (q.extra_left) title += `\nToken bổ sung: còn ${q.extra_left} (đã dùng ${q.extra_used_pct ?? '?'}%)`;
   if (q.checked_at) title += `\nThời gian tra cứu: ${fmtTime(q.checked_at)}`;
   const main = pct != null ? `${plan} · Đã dùng ${pct}%` : plan;
-  const sub = q.extra_left ? `<div class="mono" style="font-size:11px;color:var(--muted);margin-top:2px">+${esc(q.extra_left)}</div>` : '';
+  if (q.checked_at && Date.now()/1000 - q.checked_at > 3600) title += '\nDữ liệu hạn mức đã quá 1 giờ, cần tra cứu lại';
+  const age = q.checked_at ? `<div class="mono" style="font-size:10px;color:var(--muted);margin-top:2px">Tra cứu ${ago(q.checked_at)}</div>` : '';
+  const sub = (q.extra_left ? `<div class="mono" style="font-size:11px;color:var(--muted);margin-top:2px">+${esc(q.extra_left)}</div>` : '') + age;
   return `<span class="badge ${cls}" title="${esc(title)}">${esc(main)}</span>${sub}`;
 }
 
@@ -1117,7 +1119,8 @@ async function testAcc(id){
   toast('Đang mở muse.ai thực tế để xác thực phiên…');
   try{
     const r = await api(`/admin/accounts/${id}/test`, {method:'POST'});
-    toast((r.ok ? '✓ ' : '✗ ') + r.message, r.ok ? 'ok' : 'bad');
+    const quotaStatus = r.quota_error ? `; Không đọc được hạn mức: ${r.quota_error}` : r.quota ? `; Đã cập nhật hạn mức: ${r.quota.weekly_used_pct ?? '?'}%` : '';
+    toast((r.ok ? '✓ ' : '✗ ') + r.message + quotaStatus, r.ok && !r.quota_error ? 'ok' : 'warn');
     loadPool();
   }catch(e){ toast('Kiểm tra thất bại: ' + e.message, 'bad'); }
 }

@@ -313,6 +313,7 @@ class MuseEngine:
         vm_id = sj.get("vm_id")
         vm_state = sj.get("vm_state")
         wake_ok = False
+        wake_requested = False
         if wake_vm and vm_id and vm_state != "DISABLED":
             try:
                 headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in cur_cookies.items() if v)
@@ -322,7 +323,16 @@ class MuseEngine:
                     "retry_count": 0,
                     "connect_attempt_id": str(uuid.uuid4()),
                 }, timeout=8, **request_options)
-                wake_ok = rw.status_code == 200
+                wake_requested = rw.status_code == 200
+                if wake_requested:
+                    # HTTP 200 acknowledges the request; only session state confirms the VM woke.
+                    verify = upstream_request("GET", "https://muse.ai/api/session", headers=headers,
+                                          timeout=12, allow_redirects=False, **request_options)
+                    if verify.status_code == 200:
+                        verified_session = verify.json()
+                        if isinstance(verified_session, dict) and verified_session.get("status") == "assigned":
+                            vm_state = verified_session.get("vm_state") or vm_state
+                            wake_ok = vm_state == "RUNNING"
             except Exception:
                 pass
         return {
@@ -331,6 +341,7 @@ class MuseEngine:
             "vm_id": vm_id,
             "vm_state": vm_state,
             "wake_ok": wake_ok,
+            "wake_requested": wake_requested,
             "cookies": cur_cookies,
             "cookies_exp": cur_exp,
         }
@@ -401,13 +412,15 @@ class MuseEngine:
                     if (h && h.getAttribute('data-hatch-shell-hydration-state') !== 'hydrated') return 'hydrating';
                     var b = document.body ? (document.body.innerText || '') : '';
                     if (b.indexOf('Connecting...') !== -1) return 'connecting';
+                    // Empty composers may not render Send until text has been entered.
+                    if (document.querySelector('textarea').disabled) return 'input-disabled';
                     return 'ready';
                 })()""")
                 if st == "ready":
                     return True
             except Exception:
                 pass
-            time.sleep(0.08)
+            time.sleep(0.1)
         return False
 
     def reset_thread(self, for_chat: bool = False):
@@ -463,7 +476,7 @@ class MuseEngine:
                 and (account_id is None or self.current_acc_id == account_id)
                 and self.current_proxy_key == normalized_proxy):
             try:
-                if self.page.js("!!document.querySelector('textarea')"):
+                if self.page.js("!!document.querySelector('textarea')") and self._wait_ws_ready(self.page, timeout=8.0):
                     return self.page
             except Exception:
                 pass
@@ -492,36 +505,23 @@ class MuseEngine:
         page = self._open_page(proxy_server=proxy_server)
         self._apply_cookies(page, cookies, expires)
         page.send("Page.navigate", {"url": "https://muse.ai/thread/new"})
-        for _ in range(self.cfg.login_wait * 2):
-            time.sleep(0.15)
-            try:
-                if page.js("!!document.querySelector('textarea')"):
-                    self.page = page
-                    self.current_acc_id = account_id
-                    self.current_proxy_key = normalized_proxy
-                    self._wait_ws_ready(page, timeout=15.0)
-                    return page
-            except Exception:
-                pass
+        self.page = page  # Cleanup must also own pages that never become ready.
+        if self._wait_ws_ready(page, timeout=self.cfg.login_wait):
+            self.current_acc_id = account_id
+            self.current_proxy_key = normalized_proxy
+            return page
         try:
-            if page.js("!!document.querySelector('textarea')"):
-                self.page = page
-                self.current_acc_id = account_id
-                self.current_proxy_key = normalized_proxy
-                self._wait_ws_ready(page, timeout=15.0)
-                return page
-        except Exception:  # noqa: BLE001
-            pass
-        # Differentiate session expired (redirected to login) vs page loading timeout
-        try:
-            body = (page.js("document.body.innerText.slice(0,1200)") or "").lower()
-        except Exception:  # noqa: BLE001
+            body = (page.js("document.body ? document.body.innerText.slice(0,1200) : ''") or "").lower()
+        except Exception:
             body = ""
         self._close_page()
-        if re.search(r"log in|sign in|create an account|use another account", body, re.I):
-            raise MuseAuthError("Session was logged out by muse.ai (concurrent login or security check). "
-                                  "Please re-import cookies via browser extension.")
-        raise MuseGenerationError("muse.ai page load timed out (chat textarea did not appear), please check network and retry")
+        if "connecting..." in body:
+            raise MuseGenerationError("页面网关连接超时 (Connecting...)，正在自动切换账号")
+        # Distinguish an expired session from a page that never became ready.
+        if re.search(r"log in|sign in|create an account|登录|use another account", body):
+            raise MuseAuthError("会话已被 muse.ai 登出（可能被其它登录挤掉或触发风控），"
+                                "请用浏览器扩展重新导入 cookie")
+        raise MuseGenerationError("muse.ai 页面加载超时（未出现聊天输入框），请检查服务器网络后重试；未确认会话失效")
 
     def close_current_page(self):
         """Explicitly release page and isolated context held by current thread."""
@@ -869,12 +869,13 @@ class MuseEngine:
             except Exception:
                 st = {}
             tail = st.get("tail") or ""
-            if re.search(r"out of credits|token limit|quota exceeded", tail, re.I):
-                raise MuseGenerationError("Account quota exceeded")
-            # Sidebar/stale connection text does not prove this generation failed.
-            # The caller's generation deadline remains the bounded timeout.
-            # Fast fail: if assistant completed pure text reply without new attachments and not generating media
             cur_cnt = st.get("cnt") or 0
+            if re.search(r"额度不足|积分不足|out of credits|达到上限|token limit|quota exceeded", tail, re.I):
+                raise MuseGenerationError("账号额度不足")
+            # A Stop button is also shown for messages never acknowledged by the gateway.
+            if elapsed > 30.0 and cur_cnt == base_agent_cnt and re.search(
+                    r"Still sending|Delivery not confirmed|正在发送|未确认送达", tail, re.I):
+                raise MuseGenerationError("提示词未成功送达后端（Still sending / Delivery not confirmed），终止等待并重试")
             cur_txt = st.get("txt") or ""
             has_stop = bool(st.get("stop"))
             if cur_cnt > base_agent_cnt and cur_txt and not has_stop and len(atts) <= base_att_cnt:
@@ -1253,6 +1254,7 @@ class MuseEngine:
                  timeout: int = 240, expires: dict | None = None, account_id: str | None = None,
                  on_progress=None, reference_image: str | None = None,
                  stop_event=None, proxy_url: str | None = None) -> dict:
+        deadline = time.monotonic() + timeout
         self.ensure_page(cookies, expires, account_id=account_id,
                          proxy_url=proxy_url)
         self.reset_thread(for_chat=False)
@@ -1266,10 +1268,12 @@ class MuseEngine:
         base = atts_before[-1] if atts_before else {}
         baseline_src = base.get("src") or ""
         base_agent_cnt = self._agent_count()
+        if time.monotonic() >= deadline:
+            raise MuseGenerationError("任务准备超时，已停止发送")
         if self._send(prompt) not in ("clicked", "enter-sent"):
             raise MuseGenerationError("Prompt submission unconfirmed, generation aborted")
         att = self._wait_attachment(
-            baseline_src, timeout, expect, on_progress=on_progress,
+            baseline_src, max(0, deadline - time.monotonic()), expect, on_progress=on_progress,
             base_agent_cnt=base_agent_cnt, base_att_cnt=len(atts_before),
             stop_event=stop_event, baseline_sources=baseline_sources
         )
