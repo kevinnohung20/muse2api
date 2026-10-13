@@ -271,6 +271,16 @@ _LOGIN_ATTEMPTS: list[float] = []
 _ADMIN_COOKIE = "muse2api_admin"
 
 
+def _request_origin(request: Request) -> str:
+    """Resolve public origin; explicit MUSE2API_PUBLIC_BASE wins behind a proxy."""
+    configured = (CFG.public_base or "").strip().rstrip("/")
+    if configured:
+        return configured
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme).split(",", 1)[0].strip()
+    host = request.headers.get("host", request.url.netloc).split(",", 1)[0].strip()
+    return f"{proto}://{host}"
+
+
 @app.middleware("http")
 async def protect_admin(request: Request, call_next):
     path = request.url.path
@@ -287,7 +297,7 @@ async def protect_admin(request: Request, call_next):
             return JSONResponse({"detail": "Đăng nhập quản trị để tiếp tục"}, status_code=401)
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             origin = request.headers.get("origin")
-            if origin != str(request.base_url).rstrip("/") or request.headers.get("x-admin-request") != "1":
+            if origin != _request_origin(request) or request.headers.get("x-admin-request") != "1":
                 return JSONResponse({"detail": "Invalid request origin"}, status_code=403)
         request.state.admin_authenticated = True
     response = await call_next(request)
@@ -310,7 +320,7 @@ class LoginRequest(BaseModel):
 
 @app.post("/login")
 async def login(payload: LoginRequest, request: Request):
-    if request.headers.get("origin") != str(request.base_url).rstrip("/"):
+    if request.headers.get("origin") != _request_origin(request):
         raise HTTPException(403, "Invalid request origin")
     if not CFG.admin_username or not CFG.admin_password:
         raise HTTPException(503, "Chưa cấu hình tài khoản quản trị trong .env")

@@ -14,7 +14,7 @@ services:
       - MUSE2API_ADMIN_USERNAME=${MUSE2API_ADMIN_USERNAME:?Set admin username in .env}
       - MUSE2API_ADMIN_PASSWORD=${MUSE2API_ADMIN_PASSWORD:?Set admin password in .env}
       # 服务对外基准 URL，如 https://your-domain.com（留空则管理前端自动检测当前域名）
-      - MUSE2API_PUBLIC_BASE=
+      - MUSE2API_PUBLIC_BASE=${MUSE2API_PUBLIC_BASE:-}
       # 超时配置（秒）
       - MUSE2API_IMAGE_TIMEOUT=240
       - MUSE2API_VIDEO_TIMEOUT=600

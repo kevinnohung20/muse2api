@@ -31,6 +31,7 @@ with tempfile.TemporaryDirectory() as home:
         return client.request(method, base + path, timeout=5, allow_redirects=False, **kwargs)
     credentials = {"username": "test-admin", "password": "test-password"}
     headers = {"Origin": base, "X-Admin-Request": "1"}
+    module.CFG.public_base = base
     try:
         for _ in range(100):
             if server.started:
